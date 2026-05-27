@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Sistema Embebido</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<h1>Sistema Embebido - Nodo 3</h1>
+
+<nav class="navbar">
+    <button onclick="mostrarSeccion('dashboard')">Dashboard</button>
+    <button onclick="mostrarSeccion('historico')">Histórico</button>
+    <button onclick="mostrarSeccion('umbrales')">Umbrales</button>
+</nav>
+
+<section id="dashboard" class="seccion">
+    <div class="card">
+        <h2>Último registro recibido</h2>
+        <p><strong>Fecha servidor:</strong> <span id="fecha">---</span></p>
+
+        <!-- Alertas activas -->
+        <div id="zona_alertas" style="margin-bottom: 12px;"></div>
+
+        <h3>Nodo 1</h3>
+        <div class="grid">
+            <p>Acc X: <span id="n1_acc_x">---</span></p>
+            <p>Acc Y: <span id="n1_acc_y">---</span></p>
+            <p>Acc Z: <span id="n1_acc_z">---</span></p>
+            <p>Gyro X: <span id="n1_gyro_x">---</span></p>
+            <p>Gyro Y: <span id="n1_gyro_y">---</span></p>
+            <p>Gyro Z: <span id="n1_gyro_z">---</span></p>
+            <p>BPM: <span id="n1_bpm">---</span></p>
+            <p>SpO2: <span id="n1_spo2">---</span></p>
+        </div>
+
+        <h3>Nodo 2</h3>
+        <div class="grid">
+            <p>Acc X: <span id="n2_acc_x">---</span></p>
+            <p>Acc Y: <span id="n2_acc_y">---</span></p>
+            <p>Acc Z: <span id="n2_acc_z">---</span></p>
+            <p>Gyro X: <span id="n2_gyro_x">---</span></p>
+            <p>Gyro Y: <span id="n2_gyro_y">---</span></p>
+            <p>Gyro Z: <span id="n2_gyro_z">---</span></p>
+            <p>Latitud: <span id="n2_latitud">---</span></p>
+            <p>Longitud: <span id="n2_longitud">---</span></p>
+            <p>Altitud: <span id="n2_altitud">---</span></p>
+            <p>Velocidad: <span id="n2_velocidad">---</span></p>
+        </div>
+    </div>
+</section>
+
+<section id="historico" class="seccion oculto">
+    <div class="card">
+        <h2>Consulta histórica</h2>
+
+        <label>Fecha inicial</label>
+        <input type="datetime-local" id="fecha_inicio">
+
+        <label>Fecha final</label>
+        <input type="datetime-local" id="fecha_fin">
+
+        <button onclick="consultarHistorico()">Consultar</button>
+    </div>
+
+    <div class="card">
+        <h2>Registros encontrados</h2>
+        <div id="tabla_historico">Sin consulta todavía.</div>
+    </div>
+</section>
+
+<section id="umbrales" class="seccion oculto">
+    <div class="card">
+        <h2>Rangos normales / Umbrales</h2>
+
+        <label>BPM mínimo</label>
+        <input type="number" id="bpm_min">
+
+        <label>BPM máximo</label>
+        <input type="number" id="bpm_max">
+
+        <label>SpO2 mínimo (%)</label>
+        <input type="number" id="spo2_min">
+
+        <label>Movimiento máximo (g)</label>
+        <input type="number" step="0.1" id="movimiento_max">
+
+        <button onclick="guardarUmbrales()">Guardar umbrales</button>
+    </div>
+</section>
+
+<script>
+function mostrarSeccion(id) {
+    document.querySelectorAll(".seccion").forEach(sec => {
+        sec.classList.add("oculto");
+    });
+    document.getElementById(id).classList.remove("oculto");
+}
+
+async function cargarDatos() {
+    try {
+        const res = await fetch("/api/latest");
+        const data = await res.json();
+
+        if (!data || Object.keys(data).length === 0) return;
+
+        document.getElementById("fecha").textContent = data.fecha_hora ?? "---";
+
+        const campos = [
+            "n1_acc_x", "n1_acc_y", "n1_acc_z",
+            "n1_gyro_x", "n1_gyro_y", "n1_gyro_z",
+            "n1_bpm", "n1_spo2",
+            "n2_acc_x", "n2_acc_y", "n2_acc_z",
+            "n2_gyro_x", "n2_gyro_y", "n2_gyro_z",
+            "n2_latitud", "n2_longitud",
+            "n2_altitud", "n2_velocidad"
+        ];
+
+        campos.forEach(campo => {
+            const el = document.getElementById(campo);
+            if (!el) return;
+            const value = data[campo];
+            el.textContent = typeof value === "number" ? value.toFixed(2) : (value ?? "---");
+        });
+
+        marcarAlertas(data);
+    } catch (err) {
+        console.error("Error cargando datos:", err);
+    }
+}
+
+async function cargarUmbrales() {
+    try {
+        const res = await fetch("/api/thresholds");
+        const data = await res.json();
+
+        document.getElementById("bpm_min").value        = data.bpm_min        ?? "";
+        document.getElementById("bpm_max").value        = data.bpm_max        ?? "";
+        document.getElementById("spo2_min").value       = data.spo2_min       ?? "";
+        document.getElementById("movimiento_max").value = data.movimiento_max ?? "";
+    } catch (err) {
+        console.error("Error cargando umbrales:", err);
+    }
+}
+
+async function guardarUmbrales() {
+    const payload = {
+        bpm_min:        Number(document.getElementById("bpm_min").value),
+        bpm_max:        Number(document.getElementById("bpm_max").value),
+        spo2_min:       Number(document.getElementById("spo2_min").value),
+        movimiento_max: Number(document.getElementById("movimiento_max").value),
+    };
+
+    try {
+        const res = await fetch("/api/thresholds", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        const result = await res.json();
+        alert(result.message ?? "Umbrales actualizados");
+    } catch (err) {
+        alert("Error guardando umbrales");
+        console.error(err);
+    }
+}
+
+async function consultarHistorico() {
+    const inicio = document.getElementById("fecha_inicio").value;
+    const fin    = document.getElementById("fecha_fin").value;
+
+    if (!inicio || !fin) {
+        alert("Selecciona fecha inicial y final");
+        return;
+    }
+
+    const start = inicio.replace("T", " ");
+    const end   = fin.replace("T", " ");
+
+    try {
+        const res  = await fetch(`/api/history?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`);
+        const data = await res.json();
+
+        if (!data || data.length === 0) {
+            document.getElementById("tabla_historico").innerHTML = "No hay registros en ese periodo.";
+            return;
+        }
+
+        let html = `
+            <table>
+                <thead>
+                    <tr>
+                        <th>Fecha</th>
+                        <th>BPM</th>
+                        <th>SpO2</th>
+                        <th>N1 Acc (x,y,z)</th>
+                        <th>N2 Acc (x,y,z)</th>
+                        <th>Latitud</th>
+                        <th>Longitud</th>
+                        <th>Velocidad</th>
+                        <th>Alertas</th>
+                    </tr>
+                </thead>
+                <tbody>
+        `;
+
+        data.forEach(r => {
+            const alertas = [];
+            if (r.alerta_pulso)      alertas.push("Pulso");
+            if (r.alerta_spo2)       alertas.push("SpO2");
+            if (r.alerta_movimiento) alertas.push("Movimiento");
+
+            html += `
+                <tr>
+                    <td>${r.fecha_hora}</td>
+                    <td class="${r.alerta_pulso      ? 'alerta' : ''}">${r.n1_bpm}</td>
+                    <td class="${r.alerta_spo2       ? 'alerta' : ''}">${r.n1_spo2}</td>
+                    <td>${r.n1_acc_x}, ${r.n1_acc_y}, ${r.n1_acc_z}</td>
+                    <td>${r.n2_acc_x}, ${r.n2_acc_y}, ${r.n2_acc_z}</td>
+                    <td>${r.n2_latitud}</td>
+                    <td>${r.n2_longitud}</td>
+                    <td>${r.n2_velocidad}</td>
+                    <td class="${alertas.length ? 'alerta' : ''}">${alertas.join(", ") || "—"}</td>
+                </tr>
+            `;
+        });
+
+        html += `</tbody></table>`;
+        document.getElementById("tabla_historico").innerHTML = html;
+
+    } catch (err) {
+        console.error("Error consultando histórico:", err);
+        document.getElementById("tabla_historico").innerHTML = "Error al consultar.";
+    }
+}
+
+function marcarAlertas(data) {
+    // Limpiar estilos previos
+    ["n1_bpm", "n1_spo2"].forEach(id => {
+        document.getElementById(id).classList.remove("alerta");
+    });
+
+    const zona = document.getElementById("zona_alertas");
+    const mensajes = [];
+
+    if (data.alerta_pulso) {
+        document.getElementById("n1_bpm").classList.add("alerta");
+        mensajes.push("⚠️ Alerta de pulso");
+    }
+    if (data.alerta_spo2) {
+        document.getElementById("n1_spo2").classList.add("alerta");
+        mensajes.push("⚠️ Alerta de SpO2");
+    }
+    if (data.alerta_movimiento) {
+        mensajes.push("⚠️ Alerta de movimiento");
+    }
+
+    zona.innerHTML = mensajes.map(m => `<p class="alerta">${m}</p>`).join("");
+}
+
+// Carga inicial
+cargarDatos();
+cargarUmbrales();
+
+// Refresco cada segundo
+setInterval(cargarDatos, 1000);
+</script>
+
+</body>
+</html>

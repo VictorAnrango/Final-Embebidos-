@@ -1,0 +1,166 @@
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
+#include "esp_log.h"
+#include "qmi8658.h"
+#include "pulse_sensor.h"
+#include "display.h"
+#include "touch.h"
+#include "espnow_send.h"
+
+static const char *TAG = "MAIN";
+
+static qmi8658_data_t  g_imu    = {0};
+static pulse_data_t    g_pulse  = {0};
+static display_page_t  g_page   = PAGE_IMU;
+static SemaphoreHandle_t g_mutex = NULL;
+static SemaphoreHandle_t g_lcd_mutex = NULL;
+
+static void task_pulse_sampling(void *arg) {
+    for (;;) {
+        pulse_sensor_sample();
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+static void task_touch(void *arg) {
+    touch_gesture_t last_gesture = GESTURE_NONE;
+    TickType_t last_change_time = 0;
+
+    const TickType_t TOUCH_COOLDOWN = pdMS_TO_TICKS(600);
+
+    for (;;) {
+        touch_data_t td = touch_read();
+
+        if (td.gesture != GESTURE_NONE &&
+            td.gesture != last_gesture) {
+
+            TickType_t now = xTaskGetTickCount();
+
+            if ((now - last_change_time) > TOUCH_COOLDOWN) {
+
+                display_page_t nueva = g_page;
+
+                if (td.gesture == GESTURE_SWIPE_LEFT) {
+                    nueva = PAGE_PULSE;
+                } else if (td.gesture == GESTURE_SWIPE_RIGHT) {
+                    nueva = PAGE_IMU;
+                }
+
+                if (nueva != g_page) {
+                    if (xSemaphoreTake(g_mutex, pdMS_TO_TICKS(100))) {
+                        g_page = nueva;
+                        xSemaphoreGive(g_mutex);
+                    }
+
+                    last_change_time = now;
+                    //ESP_LOGI(TAG, "Pagina -> %d", (int)nueva);
+                }
+            }
+        }
+
+        if (td.gesture == GESTURE_NONE) {
+            last_gesture = GESTURE_NONE;
+        } else {
+            last_gesture = td.gesture;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
+static void task_display_refresh(void *arg) {
+    display_page_t last_page = (display_page_t)-1;
+
+    for (;;) {
+        display_page_t current_page;
+        qmi8658_data_t local_imu;
+        pulse_data_t   local_pulse;
+
+        if (xSemaphoreTake(g_mutex, pdMS_TO_TICKS(100))) {
+            current_page = g_page;
+            local_imu    = g_imu;
+            local_pulse  = g_pulse;
+            xSemaphoreGive(g_mutex);
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
+        if (current_page != last_page) {
+        if (xSemaphoreTake(g_lcd_mutex, pdMS_TO_TICKS(500))) {
+        display_show_page(&local_imu, &local_pulse, current_page);
+        xSemaphoreGive(g_lcd_mutex);
+        }
+
+    last_page = current_page;
+}
+
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
+static void task_main_cycle(void *arg) {
+    for (;;) {
+        qmi8658_data_t local_imu;
+        pulse_data_t   local_pulse;
+
+        if (qmi8658_read(&local_imu) != ESP_OK)
+            ESP_LOGW(TAG, "Error QMI8658");
+
+        local_pulse = pulse_sensor_get();
+
+        if (xSemaphoreTake(g_mutex, pdMS_TO_TICKS(100))) {
+            g_imu   = local_imu;
+            g_pulse = local_pulse;
+            xSemaphoreGive(g_mutex);
+        }
+
+        ESP_LOGI("SENSORES",
+         "ACC[X=%+.2f Y=%+.2f Z=%+.2f] | GYR[X=%+.1f Y=%+.1f Z=%+.1f] | BPM=%d | SpO2=%d%% | Pulso=%s",
+         local_imu.acc_x, local_imu.acc_y, local_imu.acc_z,
+         local_imu.gyro_x, local_imu.gyro_y, local_imu.gyro_z,
+         local_pulse.bpm,
+         local_pulse.spo2,
+         local_pulse.valid ? "OK" : "SIN SENAL");
+
+        display_page_t current_page;
+        if (xSemaphoreTake(g_mutex, pdMS_TO_TICKS(100))) {
+            current_page = g_page;
+            xSemaphoreGive(g_mutex);
+        } else {
+            current_page = PAGE_IMU;
+        }
+        if (xSemaphoreTake(g_lcd_mutex, pdMS_TO_TICKS(500))) {
+        display_update_data(&local_imu, &local_pulse, current_page);
+        xSemaphoreGive(g_lcd_mutex);
+}
+        espnow_send_data(&local_imu, &local_pulse);
+
+        vTaskDelay(pdMS_TO_TICKS(10000));
+    }
+}
+
+void app_main(void) {
+    ESP_LOGI(TAG, "=== NODO 1 INICIANDO ===");
+
+    g_mutex = xSemaphoreCreateMutex();
+    configASSERT(g_mutex != NULL);
+    g_lcd_mutex = xSemaphoreCreateMutex();
+    configASSERT(g_lcd_mutex != NULL);
+
+    ESP_ERROR_CHECK(qmi8658_init());
+    ESP_ERROR_CHECK(pulse_sensor_init());
+    ESP_ERROR_CHECK(display_init());
+    ESP_ERROR_CHECK(touch_init());
+    ESP_ERROR_CHECK(espnow_init());
+
+    ESP_LOGI(TAG, "Perifericos OK");
+
+    xTaskCreatePinnedToCore(task_pulse_sampling,  "pulse",    2048, NULL, 5, NULL, 1);
+    xTaskCreatePinnedToCore(task_touch,           "touch",    2048, NULL, 4, NULL, 1);
+    xTaskCreatePinnedToCore(task_display_refresh, "disp_ref", 4096, NULL, 3, NULL, 0);
+    xTaskCreatePinnedToCore(task_main_cycle,      "main",     4096, NULL, 2, NULL, 0);
+
+    ESP_LOGI(TAG, "Sistema corriendo");
+}

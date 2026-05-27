@@ -1,0 +1,581 @@
+#include "display.h"
+#include "driver/spi_master.h"
+#include "driver/gpio.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include <stdio.h>
+#include <string.h>
+
+static const char *TAG = "DISPLAY";
+
+#define LCD_MOSI    11
+#define LCD_CLK     10
+#define LCD_CS       9
+#define LCD_DC       8
+#define LCD_RST     14
+#define LCD_BL       2
+#define LCD_W       240
+#define LCD_H       240
+#define SAFE_X       30
+#define SAFE_W      180
+#define RGB(r,g,b) ((uint16_t)((((r)&0xF8)<<8)|(((g)&0xFC)<<3)|((b)>>3)))
+
+#define BLACK   0x0000
+#define WHITE   0xFFFF
+#define CYAN    RGB(0,255,255)
+#define GREEN   RGB(0,230,0)
+#define YELLOW  RGB(255,220,0)
+#define RED     RGB(255,50,50)
+#define GREY    RGB(120,120,120)
+#define DKGREY  RGB(30,30,30)
+
+#define BLUE    RGB(0,90,255)
+#define ORANGE  RGB(255,130,0)
+#define PURPLE  RGB(140,40,200)
+#define PINK    RGB(255,40,160)
+
+static spi_device_handle_t spi_dev;
+
+static void lcd_cmd(uint8_t cmd) {
+    gpio_set_level(LCD_DC, 0);
+    spi_transaction_t t = { .length = 8, .tx_buffer = &cmd };
+    spi_device_transmit(spi_dev, &t);
+}
+
+static void lcd_data(const uint8_t *data, int len) {
+    if (len == 0) return;
+    gpio_set_level(LCD_DC, 1);
+    spi_transaction_t t = { .length = len * 8, .tx_buffer = data };
+    spi_device_transmit(spi_dev, &t);
+}
+
+static void lcd_data_byte(uint8_t d) { lcd_data(&d, 1); }
+
+static void gc9a01_init_seq(void) {
+    gpio_set_level(LCD_RST, 0); vTaskDelay(pdMS_TO_TICKS(10));
+    gpio_set_level(LCD_RST, 1); vTaskDelay(pdMS_TO_TICKS(120));
+    lcd_cmd(0xEF);
+    lcd_cmd(0xEB); lcd_data_byte(0x14);
+    lcd_cmd(0xFE);
+    lcd_cmd(0xEF);
+    lcd_cmd(0xEB); lcd_data_byte(0x14);
+    lcd_cmd(0x84); lcd_data_byte(0x40);
+    lcd_cmd(0x85); lcd_data_byte(0xFF);
+    lcd_cmd(0x86); lcd_data_byte(0xFF);
+    lcd_cmd(0x87); lcd_data_byte(0xFF);
+    lcd_cmd(0x88); lcd_data_byte(0x0A);
+    lcd_cmd(0x89); lcd_data_byte(0x21);
+    lcd_cmd(0x8A); lcd_data_byte(0x00);
+    lcd_cmd(0x8B); lcd_data_byte(0x80);
+    lcd_cmd(0x8C); lcd_data_byte(0x01);
+    lcd_cmd(0x8D); lcd_data_byte(0x01);
+    lcd_cmd(0x8E); lcd_data_byte(0xFF);
+    lcd_cmd(0x8F); lcd_data_byte(0xFF);
+    lcd_cmd(0xB6); lcd_data_byte(0x00); lcd_data_byte(0x00);
+    lcd_cmd(0x36); lcd_data_byte(0x48);
+    lcd_cmd(0x3A); lcd_data_byte(0x05);
+    lcd_cmd(0x90); lcd_data_byte(0x08); lcd_data_byte(0x08);
+                   lcd_data_byte(0x08); lcd_data_byte(0x08);
+    lcd_cmd(0xBD); lcd_data_byte(0x06);
+    lcd_cmd(0xBC); lcd_data_byte(0x00);
+    lcd_cmd(0xFF); lcd_data_byte(0x60); lcd_data_byte(0x01); lcd_data_byte(0x04);
+    lcd_cmd(0xC3); lcd_data_byte(0x13);
+    lcd_cmd(0xC4); lcd_data_byte(0x13);
+    lcd_cmd(0xC9); lcd_data_byte(0x22);
+    lcd_cmd(0xBE); lcd_data_byte(0x11);
+    lcd_cmd(0xE1); lcd_data_byte(0x10); lcd_data_byte(0x0E);
+    lcd_cmd(0xDF); lcd_data_byte(0x21); lcd_data_byte(0x0C); lcd_data_byte(0x02);
+    lcd_cmd(0xF0); lcd_data_byte(0x45); lcd_data_byte(0x09); lcd_data_byte(0x08);
+                   lcd_data_byte(0x08); lcd_data_byte(0x26); lcd_data_byte(0x2A);
+    lcd_cmd(0xF1); lcd_data_byte(0x43); lcd_data_byte(0x70); lcd_data_byte(0x72);
+                   lcd_data_byte(0x36); lcd_data_byte(0x37); lcd_data_byte(0x6F);
+    lcd_cmd(0xF2); lcd_data_byte(0x45); lcd_data_byte(0x09); lcd_data_byte(0x08);
+                   lcd_data_byte(0x08); lcd_data_byte(0x26); lcd_data_byte(0x2A);
+    lcd_cmd(0xF3); lcd_data_byte(0x43); lcd_data_byte(0x70); lcd_data_byte(0x72);
+                   lcd_data_byte(0x36); lcd_data_byte(0x37); lcd_data_byte(0x6F);
+    lcd_cmd(0xED); lcd_data_byte(0x1B); lcd_data_byte(0x0B);
+    lcd_cmd(0xAE); lcd_data_byte(0x77);
+    lcd_cmd(0xCD); lcd_data_byte(0x63);
+    lcd_cmd(0x70); lcd_data_byte(0x07); lcd_data_byte(0x07); lcd_data_byte(0x04);
+                   lcd_data_byte(0x0E); lcd_data_byte(0x0F); lcd_data_byte(0x09);
+                   lcd_data_byte(0x07); lcd_data_byte(0x08); lcd_data_byte(0x03);
+    lcd_cmd(0xE8); lcd_data_byte(0x34);
+    lcd_cmd(0x62); lcd_data_byte(0x18); lcd_data_byte(0x0D); lcd_data_byte(0x71);
+                   lcd_data_byte(0xED); lcd_data_byte(0x70); lcd_data_byte(0x70);
+                   lcd_data_byte(0x18); lcd_data_byte(0x0F); lcd_data_byte(0x71);
+                   lcd_data_byte(0xEF); lcd_data_byte(0x70); lcd_data_byte(0x70);
+    lcd_cmd(0x63); lcd_data_byte(0x18); lcd_data_byte(0x11); lcd_data_byte(0x71);
+                   lcd_data_byte(0xF1); lcd_data_byte(0x70); lcd_data_byte(0x70);
+                   lcd_data_byte(0x18); lcd_data_byte(0x13); lcd_data_byte(0x71);
+                   lcd_data_byte(0xF3); lcd_data_byte(0x70); lcd_data_byte(0x70);
+    lcd_cmd(0x64); lcd_data_byte(0x28); lcd_data_byte(0x29); lcd_data_byte(0xF1);
+                   lcd_data_byte(0x01); lcd_data_byte(0xF1); lcd_data_byte(0x00);
+                   lcd_data_byte(0x07);
+    lcd_cmd(0x66); lcd_data_byte(0x3C); lcd_data_byte(0x00); lcd_data_byte(0xCD);
+                   lcd_data_byte(0x67); lcd_data_byte(0x45); lcd_data_byte(0x45);
+                   lcd_data_byte(0x10); lcd_data_byte(0x00); lcd_data_byte(0x00);
+                   lcd_data_byte(0x00);
+    lcd_cmd(0x67); lcd_data_byte(0x00); lcd_data_byte(0x3C); lcd_data_byte(0x00);
+                   lcd_data_byte(0x00); lcd_data_byte(0x00); lcd_data_byte(0x01);
+                   lcd_data_byte(0x54); lcd_data_byte(0x10); lcd_data_byte(0x32);
+                   lcd_data_byte(0x98);
+    lcd_cmd(0x74); lcd_data_byte(0x10); lcd_data_byte(0x85); lcd_data_byte(0x80);
+                   lcd_data_byte(0x00); lcd_data_byte(0x00); lcd_data_byte(0x4E);
+                   lcd_data_byte(0x00);
+    lcd_cmd(0x98); lcd_data_byte(0x3E); lcd_data_byte(0x07);
+    lcd_cmd(0x35);
+    lcd_cmd(0x21);
+    lcd_cmd(0x11); vTaskDelay(pdMS_TO_TICKS(120));
+    lcd_cmd(0x29); vTaskDelay(pdMS_TO_TICKS(20));
+}
+
+static void set_window(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
+    uint8_t d[4];
+    lcd_cmd(0x2A);
+    d[0]=x0>>8; d[1]=x0; d[2]=x1>>8; d[3]=x1; lcd_data(d,4);
+    lcd_cmd(0x2B);
+    d[0]=y0>>8; d[1]=y0; d[2]=y1>>8; d[3]=y1; lcd_data(d,4);
+    lcd_cmd(0x2C);
+}
+
+static void fill_rect(uint16_t x, uint16_t y,
+                       uint16_t w, uint16_t h, uint16_t color) {
+    if (w == 0 || h == 0) return;
+    set_window(x, y, x+w-1, y+h-1);
+    gpio_set_level(LCD_DC, 1);
+    uint8_t hi = color >> 8, lo = color & 0xFF;
+    static uint8_t line_buf[480];
+    int blen = w * 2;
+    if (blen > (int)sizeof(line_buf)) blen = sizeof(line_buf);
+    for (int i = 0; i < blen; i+=2) { line_buf[i]=hi; line_buf[i+1]=lo; }
+    spi_transaction_t t = { .length=blen*8, .tx_buffer=line_buf };
+    for (int j = 0; j < h; j++) spi_device_transmit(spi_dev, &t);
+}
+
+
+
+static const uint8_t font5x7[][5] = {
+    {0x3E,0x51,0x49,0x45,0x3E},{0x00,0x42,0x7F,0x40,0x00},
+    {0x42,0x61,0x51,0x49,0x46},{0x21,0x41,0x45,0x4B,0x31},
+    {0x18,0x14,0x12,0x7F,0x10},{0x27,0x45,0x45,0x45,0x39},
+    {0x3C,0x4A,0x49,0x49,0x30},{0x01,0x71,0x09,0x05,0x03},
+    {0x36,0x49,0x49,0x49,0x36},{0x06,0x49,0x49,0x29,0x1E},
+    {0x7E,0x11,0x11,0x11,0x7E},{0x7F,0x49,0x49,0x49,0x36},
+    {0x3E,0x41,0x41,0x41,0x22},{0x7F,0x41,0x41,0x22,0x1C},
+    {0x7F,0x49,0x49,0x49,0x41},{0x7F,0x09,0x09,0x09,0x01},
+    {0x3E,0x41,0x49,0x49,0x7A},{0x7F,0x08,0x08,0x08,0x7F},
+    {0x00,0x41,0x7F,0x41,0x00},{0x20,0x40,0x41,0x3F,0x01},
+    {0x7F,0x08,0x14,0x22,0x41},{0x7F,0x40,0x40,0x40,0x40},
+    {0x7F,0x02,0x04,0x02,0x7F},{0x7F,0x04,0x08,0x10,0x7F},
+    {0x3E,0x41,0x41,0x41,0x3E},{0x7F,0x09,0x09,0x09,0x06},
+    {0x3E,0x41,0x51,0x21,0x5E},{0x7F,0x09,0x19,0x29,0x46},
+    {0x46,0x49,0x49,0x49,0x31},{0x01,0x01,0x7F,0x01,0x01},
+    {0x3F,0x40,0x40,0x40,0x3F},{0x1F,0x20,0x40,0x20,0x1F},
+    {0x3F,0x40,0x38,0x40,0x3F},{0x63,0x14,0x08,0x14,0x63},
+    {0x07,0x08,0x70,0x08,0x07},{0x61,0x51,0x49,0x45,0x43},
+    {0x00,0x00,0x00,0x00,0x00},{0x00,0x60,0x60,0x00,0x00},
+    {0x20,0x10,0x08,0x04,0x02},{0x00,0x36,0x36,0x00,0x00},
+    {0x08,0x08,0x3E,0x08,0x08},{0x00,0x00,0x3E,0x00,0x00},
+};
+
+static int char_to_idx(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'A' && c <= 'Z') return c - 'A' + 10;
+    if (c >= 'a' && c <= 'z') return c - 'a' + 10;
+    if (c == ' ') return 36;
+    if (c == '.') return 37;
+    if (c == '/') return 38;
+    if (c == ':') return 39;
+    if (c == '+') return 40;
+    if (c == '-') return 41;
+    return 36;
+}
+
+static void draw_char(uint16_t x, uint16_t y, char c,
+                       uint16_t fg, uint16_t bg, int scale) {
+    int idx = char_to_idx(c);
+    for (int col = 0; col < 5; col++) {
+        uint8_t bits = font5x7[idx][col];
+        for (int row = 0; row < 7; row++) {
+            uint16_t color = (bits & (1 << row)) ? fg : bg;
+            fill_rect(x + col*scale, y + row*scale, scale, scale, color);
+        }
+    }
+}
+
+static void draw_string_centered(uint16_t cx, uint16_t y,
+                                  const char *s,
+                                  uint16_t fg, uint16_t bg, int scale) {
+    int len = 0;
+    const char *p = s;
+    while (*p++) len++;
+    int w = len * (5 + 1) * scale;
+    int x = (int)cx - w / 2;
+    if (x < 0) x = 0;
+    while (*s) {
+        draw_char((uint16_t)x, y, *s, fg, bg, scale);
+        x += (5 + 1) * scale;
+        s++;
+    }
+}
+
+static void fill_circle(int cx, int cy, int r, uint16_t color)
+{
+    for (int y = -r; y <= r; y++) {
+        int x_limit = 0;
+
+        while ((x_limit * x_limit + y * y) <= r * r) {
+            x_limit++;
+        }
+
+        x_limit--;
+
+        fill_rect(cx - x_limit, cy + y, (x_limit * 2) + 1, 1, color);
+    }
+}
+
+static void draw_plus_icon(int cx, int cy, uint16_t color)
+{
+    fill_rect(cx - 7, cy - 1, 15, 3, color);
+    fill_rect(cx - 1, cy - 7, 3, 15, color);
+}
+
+static void draw_clock_icon(int cx, int cy, uint16_t color)
+{
+    fill_circle(cx, cy, 8, color);
+    fill_circle(cx, cy, 6, BLACK);
+    fill_rect(cx, cy - 5, 2, 6, color);
+    fill_rect(cx, cy, 6, 2, color);
+}
+
+static void draw_message_icon(int cx, int cy, uint16_t color)
+{
+    fill_rect(cx - 9, cy - 6, 18, 12, color);
+    fill_rect(cx - 5, cy + 5, 5, 4, color);
+}
+
+static void draw_heart_icon(int cx, int cy, uint16_t color)
+{
+    fill_circle(cx - 5, cy - 4, 5, color);
+    fill_circle(cx + 5, cy - 4, 5, color);
+    fill_rect(cx - 9, cy - 2, 18, 8, color);
+    fill_rect(cx - 6, cy + 6, 12, 4, color);
+    fill_rect(cx - 3, cy + 10, 6, 3, color);
+}
+
+static void draw_music_icon(int cx, int cy, uint16_t color)
+{
+    fill_rect(cx + 3, cy - 10, 3, 16, color);
+    fill_rect(cx + 3, cy - 10, 10, 3, color);
+    fill_circle(cx - 2, cy + 7, 5, color);
+}
+
+static void draw_settings_icon(int cx, int cy, uint16_t color)
+{
+    fill_circle(cx, cy, 9, color);
+    fill_circle(cx, cy, 4, BLACK);
+    fill_rect(cx - 1, cy - 13, 3, 5, color);
+    fill_rect(cx - 1, cy + 8, 3, 5, color);
+    fill_rect(cx - 13, cy - 1, 5, 3, color);
+    fill_rect(cx + 8, cy - 1, 5, 3, color);
+}
+
+static void draw_location_icon(int cx, int cy, uint16_t color)
+{
+    fill_circle(cx, cy - 3, 8, color);
+    fill_circle(cx, cy - 3, 3, BLACK);
+    fill_rect(cx - 3, cy + 4, 6, 10, color);
+}
+
+static void draw_battery_icon(int cx, int cy, uint16_t color)
+{
+    fill_rect(cx - 10, cy - 5, 18, 10, color);
+    fill_rect(cx + 8, cy - 2, 3, 4, color);
+    fill_rect(cx - 7, cy - 2, 10, 4, BLACK);
+}
+
+typedef enum {
+    ICON_MUSIC = 0,
+    ICON_CLOCK,
+    ICON_MESSAGE,
+    ICON_SETTINGS,
+    ICON_LOCATION,
+    ICON_BATTERY,
+    ICON_HEART,
+    ICON_PLUS
+} app_icon_t;
+
+static void draw_app_icon(int x,
+                          int y,
+                          int r,
+                          uint16_t bg_color,
+                          app_icon_t icon,
+                          uint16_t icon_color)
+{
+    fill_circle(x, y, r, bg_color);
+
+    switch (icon) {
+        case ICON_MUSIC:
+            draw_music_icon(x, y, icon_color);
+            break;
+
+        case ICON_CLOCK:
+            draw_clock_icon(x, y, icon_color);
+            break;
+
+        case ICON_MESSAGE:
+            draw_message_icon(x, y, icon_color);
+            break;
+
+        case ICON_SETTINGS:
+            draw_settings_icon(x, y, icon_color);
+            break;
+
+        case ICON_LOCATION:
+            draw_location_icon(x, y, icon_color);
+            break;
+
+        case ICON_BATTERY:
+            draw_battery_icon(x, y, icon_color);
+            break;
+
+        case ICON_HEART:
+            draw_heart_icon(x, y, icon_color);
+            break;
+
+        case ICON_PLUS:
+        default:
+            draw_plus_icon(x, y, icon_color);
+            break;
+    }
+}
+
+void display_show_dashboard(void)
+{
+    fill_rect(0, 0, LCD_W, LCD_H, BLACK);
+
+    uint16_t cx = LCD_W / 2;
+    uint16_t cy = LCD_H / 2;
+
+    // Apps decorativas alrededor
+    draw_app_icon(cx - 55, cy - 55, 18, BLUE,    ICON_MUSIC,    WHITE);
+    draw_app_icon(cx,      cy - 72, 17, CYAN,    ICON_CLOCK,    WHITE);
+    draw_app_icon(cx + 55, cy - 55, 18, GREEN,   ICON_MESSAGE,  WHITE);
+
+    draw_app_icon(cx - 72, cy,      17, ORANGE,  ICON_LOCATION, WHITE);
+    draw_app_icon(cx + 72, cy,      17, YELLOW,  ICON_BATTERY,  BLACK);
+
+    draw_app_icon(cx - 45, cy + 55, 18, PURPLE,  ICON_SETTINGS, WHITE);
+    draw_app_icon(cx + 45, cy + 55, 18, PINK,    ICON_HEART,    WHITE);
+
+    // App central NODO1
+    fill_circle(cx, cy, 36, RED);
+    draw_heart_icon(cx, cy - 8, WHITE);
+    draw_string_centered(cx, cy + 17, "NODO1", WHITE, RED, 1);
+
+    draw_string_centered(cx, LCD_H - 22, "TOCA NODO1", GREY, BLACK, 1);
+}
+
+static void draw_hline(uint16_t y, uint16_t color) {
+    fill_rect(SAFE_X, y, SAFE_W, 1, color);
+}
+
+static void draw_back_button(void)
+{
+    // Fondo del botón
+    fill_circle(28, 28, 15, DKGREY);
+
+    // Flecha izquierda manual
+
+    // Línea central
+    fill_rect(18, 28, 10, 3, WHITE);
+
+    // Parte superior
+    fill_rect(18, 24, 6, 3, WHITE);
+
+    // Parte inferior
+    fill_rect(18, 32, 6, 3, WHITE);
+}
+
+static void display_page_imu(const qmi8658_data_t *imu) {
+    char buf[32];
+    uint16_t cx = LCD_W / 2;
+    draw_back_button();
+
+    draw_string_centered(cx, 38, "ACELEROMETRO (g)", YELLOW, BLACK, 1);
+    snprintf(buf, sizeof(buf), "X: %+.3f", imu->acc_x);
+    draw_string_centered(cx, 56, buf, WHITE, BLACK, 1);
+    snprintf(buf, sizeof(buf), "Y: %+.3f", imu->acc_y);
+    draw_string_centered(cx, 70, buf, WHITE, BLACK, 1);
+    snprintf(buf, sizeof(buf), "Z: %+.3f", imu->acc_z);
+    draw_string_centered(cx, 84, buf, WHITE, BLACK, 1);
+    draw_hline(98, GREY);
+    fill_rect(10, 115, 220, 2, DKGREY);
+    draw_string_centered(cx, 104, "GIROSCOPIO (dps)", YELLOW, BLACK, 1);
+    draw_hline(116, DKGREY);
+    snprintf(buf, sizeof(buf), "X: %+7.2f", imu->gyro_x);
+    draw_string_centered(cx, 122, buf, WHITE, BLACK, 1);
+    snprintf(buf, sizeof(buf), "Y: %+7.2f", imu->gyro_y);
+    draw_string_centered(cx, 136, buf, WHITE, BLACK, 1);
+    snprintf(buf, sizeof(buf), "Z: %+7.2f", imu->gyro_z);
+    draw_string_centered(cx, 150, buf, WHITE, BLACK, 1);
+    draw_hline(164, GREY);
+}
+
+static void display_page_pulse(const pulse_data_t *pulse) {
+    char buf[32];
+    uint16_t cx = LCD_W / 2;
+    draw_back_button();
+
+    draw_string_centered(cx, 50, "PULSO", YELLOW, BLACK, 2);
+    draw_hline(72, DKGREY);
+
+    if (pulse->valid) {
+        snprintf(buf, sizeof(buf), "%d", pulse->bpm);
+        draw_string_centered(cx, 85,  buf,   GREEN, BLACK, 3);
+        draw_string_centered(cx, 118, "BPM", GREEN, BLACK, 2);
+    } else {
+        draw_string_centered(cx, 85,  "---", RED,  BLACK, 3);
+        draw_string_centered(cx, 118, "BPM", RED,  BLACK, 2);
+        draw_string_centered(cx, 138, "SIN SENAL", GREY, BLACK, 1);
+    }
+
+    draw_hline(148, GREY);
+    draw_string_centered(cx, 155, "SPO2", YELLOW, BLACK, 2);
+    draw_hline(174, DKGREY);
+
+    if (pulse->valid && pulse->spo2 > 0) {
+    snprintf(buf, sizeof(buf), "%d%%", pulse->spo2);
+    draw_string_centered(cx, 180, buf, GREEN, BLACK, 2);
+    } else {
+    draw_string_centered(cx, 180, "---", GREY, BLACK, 2);
+}
+
+
+}
+
+static void display_update_imu_values(const qmi8658_data_t *imu) {
+    char buf[32];
+    uint16_t cx = LCD_W / 2;
+
+    // Limpia solo las zonas donde cambian los numeros.
+    // No borra toda la pantalla.
+    fill_rect(SAFE_X, 56, SAFE_W, 38, BLACK);   // Acelerometro X/Y/Z
+    fill_rect(SAFE_X, 122, SAFE_W, 38, BLACK);  // Giroscopio X/Y/Z
+
+    snprintf(buf, sizeof(buf), "X: %+.3f", imu->acc_x);
+    draw_string_centered(cx, 56, buf, WHITE, BLACK, 1);
+
+    snprintf(buf, sizeof(buf), "Y: %+.3f", imu->acc_y);
+    draw_string_centered(cx, 70, buf, WHITE, BLACK, 1);
+
+    snprintf(buf, sizeof(buf), "Z: %+.3f", imu->acc_z);
+    draw_string_centered(cx, 84, buf, WHITE, BLACK, 1);
+
+    snprintf(buf, sizeof(buf), "X: %+7.2f", imu->gyro_x);
+    draw_string_centered(cx, 122, buf, WHITE, BLACK, 1);
+
+    snprintf(buf, sizeof(buf), "Y: %+7.2f", imu->gyro_y);
+    draw_string_centered(cx, 136, buf, WHITE, BLACK, 1);
+
+    snprintf(buf, sizeof(buf), "Z: %+7.2f", imu->gyro_z);
+    draw_string_centered(cx, 150, buf, WHITE, BLACK, 1);
+}
+
+static void display_update_pulse_values(const pulse_data_t *pulse) {
+    char buf[32];
+    uint16_t cx = LCD_W / 2;
+
+    // Limpia solo las zonas donde cambian BPM, estado y SpO2.
+    // No borra titulos, lineas ni indicador de pagina.
+    fill_rect(SAFE_X, 85, SAFE_W, 60, BLACK);
+    fill_rect(SAFE_X, 180, SAFE_W, 24, BLACK);
+
+    if (pulse->valid) {
+        snprintf(buf, sizeof(buf), "%d", pulse->bpm);
+        draw_string_centered(cx, 85,  buf,   GREEN, BLACK, 3);
+        draw_string_centered(cx, 118, "BPM", GREEN, BLACK, 2);
+    } else {
+        draw_string_centered(cx, 85,  "---", RED,  BLACK, 3);
+        draw_string_centered(cx, 118, "BPM", RED,  BLACK, 2);
+        draw_string_centered(cx, 138, "SIN SENAL", GREY, BLACK, 1);
+    }
+
+    if (pulse->valid && pulse->spo2 > 0) {
+        snprintf(buf, sizeof(buf), "%d%%", pulse->spo2);
+        draw_string_centered(cx, 180, buf, GREEN, BLACK, 2);
+    } else {
+        draw_string_centered(cx, 180, "---", GREY, BLACK, 2);
+    }
+}
+
+void display_update_data(const qmi8658_data_t *imu,
+                         const pulse_data_t   *pulse,
+                         display_page_t        page) {
+    switch (page) {
+        case PAGE_IMU:
+            display_update_imu_values(imu);
+            break;
+
+        case PAGE_PULSE:
+            display_update_pulse_values(pulse);
+            break;
+    }
+}
+
+void display_draw_page_indicator(display_page_t page, int total) {
+    uint16_t cx = LCD_W / 2;
+    uint16_t y  = 228;
+    int dot_r   = 4;
+    int spacing = 16;
+    int start_x = cx - ((total - 1) * spacing) / 2;
+    for (int i = 0; i < total; i++) {
+        uint16_t color = (i == (int)page) ? CYAN : GREY;
+        uint16_t dx = start_x + i * spacing;
+        fill_rect(dx - dot_r, y - dot_r, dot_r*2, dot_r*2, color);
+    }
+}
+
+void display_show_page(const qmi8658_data_t *imu,
+                        const pulse_data_t   *pulse,
+                        display_page_t        page) {
+    fill_rect(0, 0, LCD_W, LCD_H, BLACK);
+    switch (page) {
+        case PAGE_IMU:   display_page_imu(imu);    break;
+        case PAGE_PULSE: display_page_pulse(pulse); break;
+    }
+    display_draw_page_indicator(page, 2);
+}
+
+esp_err_t display_init(void) {
+    gpio_config_t io = {
+        .pin_bit_mask = (1ULL<<LCD_DC)|(1ULL<<LCD_RST)|(1ULL<<LCD_BL),
+        .mode         = GPIO_MODE_OUTPUT,
+    };
+    gpio_config(&io);
+    gpio_set_level(LCD_BL, 1);
+
+    spi_bus_config_t buscfg = {
+        .mosi_io_num     = LCD_MOSI,
+        .miso_io_num     = -1,
+        .sclk_io_num     = LCD_CLK,
+        .quadwp_io_num   = -1,
+        .quadhd_io_num   = -1,
+        .max_transfer_sz = LCD_W * 4 * 2,
+    };
+    spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO);
+
+    spi_device_interface_config_t devcfg = {
+        .clock_speed_hz = 40*1000*1000,
+        .mode           = 0,
+        .spics_io_num   = LCD_CS,
+        .queue_size     = 7,
+    };
+    spi_bus_add_device(SPI2_HOST, &devcfg, &spi_dev);
+
+    gc9a01_init_seq();
+    fill_rect(0, 0, LCD_W, LCD_H, BLACK);
+    ESP_LOGI(TAG, "GC9A01 OK");
+    return ESP_OK;
+}
